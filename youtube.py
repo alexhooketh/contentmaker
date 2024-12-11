@@ -2,7 +2,7 @@ import asyncio
 import re
 import json
 import traceback
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
 from pathlib import Path
 
 import requests
@@ -244,7 +244,7 @@ async def normalize_transcript(title: str, transcript: str, glossary: str) -> Op
             if not result:
                 return None
                 
-            print("Processing:", result)
+            print(f"Processing: {result[:20]}...")
             # sometimes it gives the equivalent stuff
             if result[:20] != prev_result[:20]:
                 prompt += result
@@ -274,13 +274,14 @@ def sanitize_filename(filename: str) -> str:
     filename = re.sub(r"[^A-Za-z0-9_\-\.]", "", filename)
     return filename[:200]
 
-async def process_video(url: str, glossary: str) -> None:
+async def process_video(url: str, glossary: str, topic_name: str) -> None:
     """
     Process a single video URL.
     
     Args:
         url: YouTube video URL
         glossary: Reference glossary
+        topic_name: Name of the topic for organizing output
     """
     try:
         title, transcript = await fetch_transcript(url)
@@ -295,13 +296,17 @@ async def process_video(url: str, glossary: str) -> None:
         if not normalized:
             return
 
+        # Create topic directory
+        topic_dir = OUTPUTS_DIR / sanitize_filename(topic_name)
+        topic_dir.mkdir(exist_ok=True)
+
         safe_title = sanitize_filename(title) or "video"
-        output_file = OUTPUTS_DIR / f"{safe_title}.txt"
+        output_file = topic_dir / f"{safe_title}.txt"
         
         async with aiofiles.open(output_file, "w", encoding="utf-8") as f:
             await f.write(normalized)
 
-        success_msg = f"✅ Successfully processed video:\nTitle: {title}\nOutput: {output_file}"
+        success_msg = f"✅ Successfully processed video:\nTopic: {topic_name}\nTitle: {title}\nOutput: {output_file}"
         send_telegram_message(success_msg)
         print(f"Saved normalized transcript to {output_file}")
         
@@ -313,33 +318,52 @@ async def process_video(url: str, glossary: str) -> None:
 def main() -> None:
     """Main execution function."""
     try:
-        glossary_file = Path(input("Enter the path to the glossary/docs .txt file: ").strip().replace("'", ""))
-        if not glossary_file.exists():
-            error_msg = "❌ Glossary file not found. Please provide a valid file path."
-            send_telegram_message(error_msg)
-            print(error_msg)
-            return
-
-        with open(glossary_file, "r", encoding="utf-8") as gf:
-            glossary = gf.read()
-
-        video_urls: List[str] = []
+        # Dictionary to store topics and their associated videos
+        topics: Dict[str, Dict[str, List[str]]] = {}
+        
         while True:
-            video_url = input("Enter YouTube video URL (press Enter to stop): ").strip()
-            if not video_url:
+            glossary_file = input("Enter the path to the glossary/docs .txt file (press Enter to stop adding topics): ").strip().replace("'", "")
+            if not glossary_file:
                 break
-            video_urls.append(video_url)
 
-        if not video_urls:
-            print("No video URLs provided.")
+            glossary_path = Path(glossary_file)
+            if not glossary_path.exists():
+                print("❌ Glossary file not found. Please provide a valid file path.")
+                continue
+
+            # Use the filename (without extension) as the topic name
+            topic_name = glossary_path.stem
+
+            with open(glossary_path, "r", encoding="utf-8") as gf:
+                glossary = gf.read()
+
+            video_urls: List[str] = []
+            print(f"\nEnter YouTube video URLs for topic '{topic_name}':")
+            while True:
+                video_url = input("Enter YouTube video URL (press Enter when done with this topic): ").strip()
+                if not video_url:
+                    break
+                video_urls.append(video_url)
+
+            if video_urls:
+                topics[topic_name] = {
+                    "glossary": glossary,
+                    "videos": list(set(video_urls))  # Remove duplicates
+                }
+                print(f"Added {len(video_urls)} videos for topic '{topic_name}'\n")
+
+        if not topics:
+            print("No topics or videos provided.")
             return
-
-        video_urls = list(set(video_urls))  # Remove duplicates
 
         async def process_all_videos() -> None:
-            tasks = [process_video(url, glossary) for url in video_urls]
+            tasks = []
+            for topic_name, topic_data in topics.items():
+                for url in topic_data["videos"]:
+                    tasks.append(process_video(url, topic_data["glossary"], topic_name))
             await asyncio.gather(*tasks)
 
+        print(f"\nProcessing {sum(len(t['videos']) for t in topics.values())} videos across {len(topics)} topics...")
         asyncio.run(process_all_videos())
         
     except Exception as e:
